@@ -1,28 +1,10 @@
 import numpy as np
+from scipy.optimize._linesearch import scalar_search_wolfe2
+
 
 class LineSearchTool(object):
     """
     Line search tool for adaptively tuning the step size of the algorithm.
-
-    method : String containing 'Wolfe', 'Armijo' or 'Constant'
-        Method of tuning step-size.
-        Must be be one of the following strings:
-            - 'Wolfe' -- enforce strong Wolfe conditions;
-            - 'Armijo" -- adaptive Armijo rule;
-            - 'Constant' -- constant step size.
-            - 'Best' -- optimal step size inferred via analytical minimization.
-    kwargs :
-        Additional parameters of line_search method:
- 
-        If method == 'Wolfe':
-            c1, c2 : Constants for strong Wolfe conditions
-            alpha_0 : Starting point for the backtracking procedure
-                to be used in Armijo method in case of failure of Wolfe method.
-        If method == 'Armijo':
-            c1 : Constant for Armijo rule
-            alpha_0 : Starting point for the backtracking procedure.
-        If method == 'Constant':
-            c : The step size which is returned on every step.
     """
     def __init__(self, method='Wolfe', **kwargs):
         self._method = method
@@ -41,45 +23,61 @@ class LineSearchTool(object):
             raise ValueError('Unknown method {}'.format(method))
 
     @classmethod
-    def from_dict(cls, dict):
-        return cls(**dict)
+    def from_dict(cls, options):
+        if type(options) != dict:
+            raise TypeError('LineSearchTool initializer must be of type dict')
+        return cls(**options)
 
     def to_dict(self):
         return self.__dict__
 
     def line_search(self, oracle, x_k, d_k, previous_alpha=None):
-        """
-        Finds the step size alpha for a given starting point x_k
-        and for a given search direction d_k that satisfies necessary
-        conditions for phi(alpha) = oracle.func(x_k + alpha * d_k).
+        alpha_0 = previous_alpha if previous_alpha is not None else getattr(self, 'alpha_0', 1.0)
 
-        Parameters
-        ----------
-        oracle : BaseSmoothOracle-descendant object
-            Oracle with .func_directional() and .grad_directional() methods implemented for computing
-            function values and its directional derivatives.
-        x_k : np.array
-            Starting point
-        d_k : np.array
-            Search direction
-        previous_alpha : float or None
-            Starting point to use instead of self.alpha_0 to keep the progress from
-             previous steps. If None, self.alpha_0, is used as a starting point.
+        phi = lambda a: oracle.func_directional(x_k, d_k, a)
+        dphi = lambda a: oracle.grad_directional(x_k, d_k, a)
+        dphi0 = dphi(0)
 
-        Returns
-        -------
-        alpha : float or None if failure
-            Chosen step size
-        """
-        # TODO: Implement line search procedures for Armijo, Wolfe and Constant steps.
-        return None
+        if dphi0 >= 0:
+            return None
+
+        if self._method == 'Constant':
+            return self.c
+
+        if self._method == 'Best':
+            h_d = oracle.hess_vec(x_k, d_k) if hasattr(oracle, 'hess_vec') else oracle.hess(x_k).dot(d_k)
+            denom = np.dot(d_k, h_d)
+            if denom <= 0:
+                return None
+            return -dphi0 / denom
+
+        if self._method == 'Wolfe':
+            alpha, _, _, _ = scalar_search_wolfe2(
+                phi,
+                dphi,
+                phi0=phi(0),
+                derphi0=dphi0,
+                c1=self.c1,
+                c2=self.c2,
+            )
+            if alpha is not None:
+                return alpha
+
+        if self._method in ['Wolfe', 'Armijo']:
+            alpha = alpha_0
+            phi0 = phi(0)
+            while phi(alpha) > phi0 + self.c1 * alpha * dphi0:
+                alpha *= 0.5
+                if alpha < 1e-16:
+                    return None
+            return alpha
+
+        raise ValueError('Unknown method {}'.format(self._method))
 
 
 def get_line_search_tool(line_search_options=None):
     if line_search_options:
-        if type(line_search_options) is LineSearchTool:
+        if hasattr(line_search_options, 'line_search'):
             return line_search_options
-        else:
-            return LineSearchTool.from_dict(line_search_options)
-    else:
-        return LineSearchTool()
+        return LineSearchTool.from_dict(line_search_options)
+    return LineSearchTool()

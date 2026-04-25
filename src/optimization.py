@@ -3,10 +3,92 @@ import numpy as np
 import scipy
 from collections import defaultdict, deque
 from numpy.linalg import LinAlgError
-try:
-    from utils import get_line_search_tool
-except ImportError:
-    from .utils import get_line_search_tool
+
+from utils import get_line_search_tool
+
+
+def _update_history(history, oracle, x, grad, start_time):
+    history['time'].append(time.perf_counter() - start_time)
+    history['func'].append(oracle.func(x))
+    history['grad_norm'].append(np.linalg.norm(grad))
+    if x.size <= 2:
+        history['x'].append(np.copy(x))
+
+
+def gradient_descent(oracle, x_0, tolerance=1e-5, max_iter=10000,
+                     line_search_options=None, trace=False, display=False):
+    history = defaultdict(list) if trace else None
+    line_search_tool = get_line_search_tool(line_search_options)
+    x_k = np.copy(x_0)
+    grad0 = oracle.grad(x_k)
+    grad0_norm2 = np.dot(grad0, grad0)
+    if not np.isfinite(grad0_norm2):
+        return x_k, 'computational_error', history
+
+    start_time = time.perf_counter()
+    previous_alpha = None
+
+    for k in range(max_iter):
+        grad_k = oracle.grad(x_k)
+        grad_k_norm2 = np.dot(grad_k, grad_k)
+        if grad_k_norm2 <= tolerance * grad0_norm2:
+            return x_k, 'success', history
+
+        d_k = -grad_k
+        alpha = line_search_tool.line_search(oracle, x_k, d_k, previous_alpha)
+        if alpha is None or not np.isfinite(alpha):
+            return x_k, 'computational_error', history
+
+        x_k = x_k + alpha * d_k
+        previous_alpha = alpha
+
+        if trace:
+            _update_history(history, oracle, x_k, oracle.grad(x_k), start_time)
+            history['alpha'].append(alpha)
+
+        if display:
+            print('iter={}, alpha={:.3e}, grad_norm={:.3e}'.format(k, alpha, np.sqrt(grad_k_norm2)))
+
+    return x_k, 'iterations_exceeded', history
+
+
+def newton(oracle, x_0, tolerance=1e-5, max_iter=100,
+           line_search_options=None, trace=False, display=False):
+    history = defaultdict(list) if trace else None
+    line_search_tool = get_line_search_tool(line_search_options)
+    x_k = np.copy(x_0)
+    grad0 = oracle.grad(x_k)
+    grad0_norm2 = np.dot(grad0, grad0)
+    if not np.isfinite(grad0_norm2):
+        return x_k, 'computational_error', history
+
+    start_time = time.perf_counter()
+
+    for k in range(max_iter):
+        grad_k = oracle.grad(x_k)
+        grad_k_norm2 = np.dot(grad_k, grad_k)
+        if grad_k_norm2 <= tolerance * grad0_norm2:
+            return x_k, 'success', history
+
+        try:
+            c, lower = scipy.linalg.cho_factor(oracle.hess(x_k), check_finite=True)
+            d_k = -scipy.linalg.cho_solve((c, lower), grad_k)
+        except LinAlgError:
+            return x_k, 'newton_direction_error', history
+
+        alpha = line_search_tool.line_search(oracle, x_k, d_k, 1.0)
+        if alpha is None or not np.isfinite(alpha):
+            return x_k, 'computational_error', history
+
+        x_k = x_k + alpha * d_k
+        if trace:
+            _update_history(history, oracle, x_k, oracle.grad(x_k), start_time)
+            history['alpha'].append(alpha)
+
+        if display:
+            print('iter={}, alpha={:.3e}, grad_norm={:.3e}'.format(k, alpha, np.sqrt(grad_k_norm2)))
+
+    return x_k, 'iterations_exceeded', history
 
 
 def _update_history(history, oracle, x, grad, start_time):
@@ -346,7 +428,7 @@ def hessian_free_newton(oracle, x_0, tolerance=1e-4, max_iter=500,
         eta = min(0.5, np.sqrt(grad_k_norm))
         d0 = -grad_k
         cg_iters = 0
-        for _ in range(12):
+        while True:
             matvec = lambda v: oracle.hess_vec(x_k, v)
             d_k, msg, cg_hist = linear_conjugate_gradients(
                 matvec,
@@ -361,8 +443,6 @@ def hessian_free_newton(oracle, x_0, tolerance=1e-4, max_iter=500,
                 break
             eta *= 0.1
             d0 = d_k
-        else:
-            d_k = -grad_k
 
         alpha = line_search_tool.line_search(oracle, x_k, d_k, 1.0)
         if alpha is None or not np.isfinite(alpha):
